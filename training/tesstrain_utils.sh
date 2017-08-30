@@ -23,9 +23,10 @@ else
 fi
 OUTPUT_DIR="/tmp/tesstrain/tessdata"
 OVERWRITE=0
+LINEDATA=0
 RUN_SHAPE_CLUSTERING=0
 EXTRACT_FONT_PROPERTIES=1
-WORKSPACE_DIR=`mktemp -d`
+WORKSPACE_DIR=$(mktemp -d)
 
 # Logging helper functions.
 tlog() {
@@ -41,13 +42,21 @@ err_exit() {
 # if the program file is not found.
 # Usage: run_command CMD ARG1 ARG2...
 run_command() {
-    local cmd=`which $1`
+    local cmd=$(which $1)
     if [[ -z ${cmd} ]]; then
-        err_exit "$1 not found"
+      for d in api training; do
+        cmd=$(which $d/$1)
+        if [[ ! -z ${cmd} ]]; then
+          break
+        fi
+      done
+      if [[ -z ${cmd} ]]; then
+          err_exit "$1 not found"
+      fi
     fi
     shift
     tlog "[$(date)] ${cmd} $@"
-    ${cmd} "$@" 2>&1 1>&2 | tee -a ${LOG_FILE}
+    "${cmd}" "$@" 2>&1 1>&2 | tee -a ${LOG_FILE}
     # check completion status
     if [[ $? -gt 0 ]]; then
         err_exit "Program $(basename ${cmd}) failed. Abort."
@@ -90,11 +99,11 @@ parse_flags() {
             --)
                 break;;
             --fontlist)
-		fn=0
-		FONTS=""
+                fn=0
+                FONTS=""
                 while test $j -lt ${#ARGV[@]}; do
                     test -z "${ARGV[$j]}" && break
-                    test `echo ${ARGV[$j]} | cut -c -2` = "--" && break
+                    test $(echo ${ARGV[$j]} | cut -c -2) = "--" && break
                     FONTS[$fn]="${ARGV[$j]}"
                     fn=$((fn+1))
                     j=$((j+1))
@@ -104,7 +113,7 @@ parse_flags() {
                 exp=""
                 while test $j -lt ${#ARGV[@]}; do
                     test -z "${ARGV[$j]}" && break
-                    test `echo ${ARGV[$j]} | cut -c -2` = "--" && break
+                    test $(echo ${ARGV[$j]} | cut -c -2) = "--" && break
                     exp="$exp ${ARGV[$j]}"
                     j=$((j+1))
                 done
@@ -124,6 +133,8 @@ parse_flags() {
                 i=$j ;;
             --overwrite)
                 OVERWRITE=1 ;;
+            --linedata_only)
+                LINEDATA=1 ;;
             --extract_font_properties)
                 EXTRACT_FONT_PROPERTIES=1 ;;
             --noextract_font_properties)
@@ -199,9 +210,9 @@ generate_font_image() {
 
     local common_args="--fontconfig_tmpdir=${FONT_CONFIG_CACHE}"
     common_args+=" --fonts_dir=${FONTS_DIR} --strip_unrenderable_words"
-    common_args+=" --fontconfig_refresh_config_file=false --leading=${LEADING}"
+    common_args+=" --leading=${LEADING}"
     common_args+=" --char_spacing=${CHAR_SPACING} --exposure=${EXPOSURE}"
-    common_args+=" --outputbase=${outbase}"
+    common_args+=" --outputbase=${outbase} --max_pages=3"
 
     # add --writing_mode=vertical-upright to common_args if the font is
     # specified to be rendered vertically.
@@ -216,7 +227,7 @@ generate_font_image() {
         --text=${TRAINING_TEXT} ${TEXT2IMAGE_EXTRA_ARGS}
     check_file_readable ${outbase}.box ${outbase}.tif
 
-    if (( ${EXTRACT_FONT_PROPERTIES} )) &&
+    if ((EXTRACT_FONT_PROPERTIES)) &&
         [[ -r ${TRAIN_NGRAMS_FILE} ]]; then
         tlog "Extracting font properties of ${font}"
         run_command text2image ${common_args} --font="${font}" \
@@ -240,7 +251,7 @@ phase_I_generate_image() {
     CHAR_SPACING="0.0"
 
     for EXPOSURE in $EXPOSURES; do
-        if (( ${EXTRACT_FONT_PROPERTIES} )) && [[ -r ${BIGRAM_FREQS_FILE} ]]; then
+        if ((EXTRACT_FONT_PROPERTIES)) && [[ -r ${BIGRAM_FREQS_FILE} ]]; then
             # Parse .bigram_freqs file and compose a .train_ngrams file with text
             # for tesseract to recognize during training. Take only the ngrams whose
             # combined weight accounts for 95% of all the bigrams in the language.
@@ -368,10 +379,11 @@ phase_D_generate_dawg() {
 phase_E_extract_features() {
     local box_config=$1
     local par_factor=$2
+    local ext=$3
     if [[ -z ${par_factor} || ${par_factor} -le 0 ]]; then
         par_factor=1
     fi
-    tlog "\n=== Phase E: Extracting features ==="
+    tlog "\n=== Phase E: Generating ${ext} files ==="
 
     local img_files=""
     for exposure in ${EXPOSURES}; do
@@ -401,7 +413,7 @@ phase_E_extract_features() {
     export TESSDATA_PREFIX=${OLD_TESSDATA_PREFIX}
     # Check that all the output files were produced.
     for img_file in ${img_files}; do
-        check_file_readable ${img_file%.*}.tr
+        check_file_readable "${img_file%.*}.${ext}"
     done
 }
 
@@ -420,7 +432,7 @@ phase_C_cluster_prototypes() {
 
 # Phase S : (S)hape clustering
 phase_S_cluster_shapes() {
-    if (( ! ${RUN_SHAPE_CLUSTERING} )); then
+    if ((! RUN_SHAPE_CLUSTERING)); then
         tlog "\n=== Shape Clustering disabled ==="
         return
     fi
@@ -484,6 +496,46 @@ phase_B_generate_ambiguities() {
   # TODO: Add support for generating ambiguities automatically.
 }
 
+make__lstmdata() {
+  tlog "\n=== Constructing LSTM training data ==="
+  local lang_prefix="${LANGDATA_ROOT}/${LANG_CODE}/${LANG_CODE}"
+  if [[ ! -d "${OUTPUT_DIR}" ]]; then
+      tlog "Creating new directory ${OUTPUT_DIR}"
+      mkdir -p "${OUTPUT_DIR}"
+  fi
+  local lang_is_rtl=""
+  # TODO(rays) set using script lang lists.
+  case "${LANG_CODE}" in
+    ara | div| fas | pus | snd | syr | uig | urd | kur_ara | heb | yid )
+      lang_is_rtl="--lang_is_rtl" ;;
+    * ) ;;
+  esac
+  local pass_through=""
+  # TODO(rays) set using script lang lists.
+  case "${LANG_CODE}" in
+    asm | ben | bih | hin | mar | nep | guj | kan | mal | tam | tel | pan | \
+    dzo | sin | san | bod | ori | khm | mya | tha | lao | heb | yid | ara | \
+    fas | pus | snd | urd | div | syr | uig | kur_ara )
+      pass_through="--pass_through_recoder" ;;
+    * ) ;;
+  esac
+
+  # Build the starter traineddata from the inputs.
+  run_command combine_lang_model \
+    --input_unicharset "${TRAINING_DIR}/${LANG_CODE}.unicharset" \
+    --script_dir "${LANGDATA_ROOT}" \
+    --words "${lang_prefix}.wordlist" \
+    --numbers "${lang_prefix}.numbers" \
+    --puncs "${lang_prefix}.punc" \
+    --output_dir "${OUTPUT_DIR}" --lang "${LANG_CODE}" \
+    "${pass_through}" "${lang_is_rtl}"
+  for f in "${TRAINING_DIR}/${LANG_CODE}".*.lstmf; do
+    tlog "Moving ${f} to ${OUTPUT_DIR}"
+    mv "${f}" "${OUTPUT_DIR}"
+  done
+  local lstm_list="${OUTPUT_DIR}/${LANG_CODE}.training_files.txt"
+  ls -1 "${OUTPUT_DIR}/${LANG_CODE}".*.lstmf > "${lstm_list}"
+}
 
 make__traineddata() {
   tlog "\n=== Making final traineddata file ==="
@@ -520,7 +572,7 @@ make__traineddata() {
       mkdir -p ${OUTPUT_DIR}
   fi
   local destfile=${OUTPUT_DIR}/${LANG_CODE}.traineddata;
-  if [[ -f ${destfile} ]] && (( ! ${OVERWRITE} )); then
+  if [[ -f ${destfile} ]] && ((! OVERWRITE)); then
       err_exit "File ${destfile} exists and no --overwrite specified";
   fi
   tlog "Moving ${TRAINING_DIR}/${LANG_CODE}.traineddata to ${OUTPUT_DIR}"

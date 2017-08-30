@@ -17,8 +17,8 @@
 //
 ///////////////////////////////////////////////////////////////////////
 
-#ifndef TESSERACT_CCUTIL_UNICHARSET_H__
-#define TESSERACT_CCUTIL_UNICHARSET_H__
+#ifndef TESSERACT_CCUTIL_UNICHARSET_H_
+#define TESSERACT_CCUTIL_UNICHARSET_H_
 
 #include "errcode.h"
 #include "genericvector.h"
@@ -37,6 +37,13 @@ enum SpecialUnicharCodes {
   UNICHAR_BROKEN,
 
   SPECIAL_UNICHAR_CODES_COUNT
+};
+
+// Boolean flag for unichar_insert. It's a bit of a double negative to allow
+// the default value to be false.
+enum class OldUncleanUnichars {
+  kFalse,
+  kTrue,
 };
 
 class CHAR_FRAGMENT {
@@ -141,10 +148,10 @@ class UNICHARSET {
   // Custom list of characters and their ligature forms (UTF8)
   // These map to unicode values in the private use area (PUC) and are supported
   // by only few font families (eg. Wyld, Adobe Caslon Pro).
-  static const char* kCustomLigatures[][2];
+  static TESS_API const char* kCustomLigatures[][2];
 
   // List of strings for the SpecialUnicharCodes. Keep in sync with the enum.
-  static const char* kSpecialUnicharCodes[SPECIAL_UNICHAR_CODES_COUNT];
+  static TESS_API const char* kSpecialUnicharCodes[SPECIAL_UNICHAR_CODES_COUNT];
 
   // ICU 2.0 UCharDirection enum (from third_party/icu/include/unicode/uchar.h)
   enum Direction {
@@ -181,8 +188,7 @@ class UNICHARSET {
 
   // Return the UNICHAR_ID of a given unichar representation within the
   // UNICHARSET. Only the first length characters from unichar_repr are used.
-  UNICHAR_ID unichar_to_id(const char* const unichar_repr,
-                                 int length) const;
+  UNICHAR_ID unichar_to_id(const char* const unichar_repr, int length) const;
 
   // Return the minimum number of bytes that matches a legal UNICHAR_ID,
   // while leaving the rest of the string encodable. Returns 0 if the
@@ -191,7 +197,7 @@ class UNICHARSET {
   // Use encode_string in preference to repeatedly calling step.
   int step(const char* str) const;
 
-  // Return whether the given UTF-8 string is encodable with this UNICHARSET.
+  // Returns true if the given UTF-8 string is encodable with this UNICHARSET.
   // If not encodable, write the first byte offset which cannot be converted
   // into the second (return) argument.
   bool encodable_string(const char *str, int *first_bad_position) const;
@@ -208,6 +214,9 @@ class UNICHARSET {
   // If encoded_length is not NULL then on return it contains the length of
   // str that was encoded. (if give_up_on_failure the location of the first
   // failure, otherwise strlen(str).)
+  // WARNING: Caller must guarantee that str has already been cleaned of codes
+  // that do not belong in the unicharset, or encoding may fail.
+  // Use CleanupString to perform the cleaning.
   bool encode_string(const char* str, bool give_up_on_failure,
                      GenericVector<UNICHAR_ID>* encoding,
                      GenericVector<char>* lengths,
@@ -227,6 +236,13 @@ class UNICHARSET {
   // by its hex unicodes.
   static STRING debug_utf8_str(const char* str);
 
+  // Removes/replaces content that belongs in rendered text, but not in the
+  // unicharset.
+  static string CleanupString(const char* utf8_str) {
+    return CleanupString(utf8_str, strlen(utf8_str));
+  }
+  static string CleanupString(const char* utf8_str, int length);
+
   // Return a STRING containing debug information on the unichar, including
   // the id_to_unichar, its hex unicodes and the properties.
   STRING debug_str(UNICHAR_ID id) const;
@@ -234,8 +250,29 @@ class UNICHARSET {
     return debug_str(unichar_to_id(unichar_repr));
   }
 
-  // Add a unichar representation to the set.
-  void unichar_insert(const char* const unichar_repr);
+  // Adds a unichar representation to the set. If old_style is true, then
+  // TATWEEL characters are kept and n-grams are allowed. Otherwise TATWEEL
+  // characters are ignored/skipped as if they don't exist and n-grams that
+  // can already be encoded are not added.
+  void unichar_insert(const char* const unichar_repr,
+                      OldUncleanUnichars old_style);
+  void unichar_insert(const char* const unichar_repr) {
+    unichar_insert(unichar_repr, OldUncleanUnichars::kFalse);
+  }
+  // Adds a unichar representation to the set. Avoids setting old_style to true,
+  // unless it is necessary to make the new unichar get added.
+  void unichar_insert_backwards_compatible(const char* const unichar_repr) {
+    string cleaned = CleanupString(unichar_repr);
+    if (cleaned != unichar_repr) {
+      unichar_insert(unichar_repr, OldUncleanUnichars::kTrue);
+    } else {
+      int old_size = size();
+      unichar_insert(unichar_repr, OldUncleanUnichars::kFalse);
+      if (size() == old_size) {
+        unichar_insert(unichar_repr, OldUncleanUnichars::kTrue);
+      }
+    }
+  }
 
   // Return true if the given unichar id exists within the set.
   // Relies on the fact that unichar ids are contiguous in the unicharset.
@@ -283,6 +320,7 @@ class UNICHARSET {
     top_bottom_set_ = false;
     script_has_upper_lower_ = false;
     script_has_xheight_ = false;
+    old_style_included_ = false;
     null_sid_ = 0;
     common_sid_ = 0;
     latin_sid_ = 0;
@@ -291,6 +329,9 @@ class UNICHARSET {
     han_sid_ = 0;
     hiragana_sid_ = 0;
     katakana_sid_ = 0;
+    thai_sid_ = 0;
+    hangul_sid_ = 0;
+    default_sid_ = 0;
   }
 
   // Return the size of the set (the number of different UNICHAR it holds).
@@ -605,6 +646,16 @@ class UNICHARSET {
     return unichars[unichar_id].properties.AnyRangeEmpty();
   }
 
+  // Returns true if the script of the given id is space delimited.
+  // Returns false for Han and Thai scripts.
+  bool IsSpaceDelimited(UNICHAR_ID unichar_id) const {
+    if (INVALID_UNICHAR_ID == unichar_id) return true;
+    int script_id = get_script(unichar_id);
+    return script_id != han_sid_ && script_id != thai_sid_ &&
+           script_id != hangul_sid_ && script_id != hiragana_sid_ &&
+           script_id != katakana_sid_;
+  }
+
   // Return the script name of the given unichar.
   // The returned pointer will always be the same for the same script, it's
   // managed by unicharset and thus MUST NOT be deleted
@@ -731,7 +782,7 @@ class UNICHARSET {
   // unichar representation represents a character fragment.
   const CHAR_FRAGMENT *get_fragment(const char* const unichar_repr) const {
     if (unichar_repr == NULL || unichar_repr[0] == '\0' ||
-        !ids.contains(unichar_repr)) {
+        !ids.contains(unichar_repr, false)) {
       return NULL;
     }
     return get_fragment(unichar_to_id(unichar_repr));
@@ -774,7 +825,7 @@ class UNICHARSET {
 
   // Returns normalized version of unichar with the given unichar_id.
   const char *get_normed_unichar(UNICHAR_ID unichar_id) const {
-    if (unichar_id == UNICHAR_SPACE && has_special_codes()) return " ";
+    if (unichar_id == UNICHAR_SPACE) return " ";
     return unichars[unichar_id].properties.normed.string();
   }
   // Returns a vector of UNICHAR_IDs that represent the ids of the normalized
@@ -836,6 +887,8 @@ class UNICHARSET {
   int han_sid() const { return han_sid_; }
   int hiragana_sid() const { return hiragana_sid_; }
   int katakana_sid() const { return katakana_sid_; }
+  int thai_sid() const { return thai_sid_; }
+  int hangul_sid() const { return hangul_sid_; }
   int default_sid() const { return default_sid_; }
 
   // Returns true if the unicharset has the concept of upper/lower case.
@@ -951,6 +1004,11 @@ class UNICHARSET {
   bool load_via_fgets(TessResultCallback2<char *, char *, int> *fgets_cb,
                       bool skip_fragments);
 
+  // List of mappings to make when ingesting strings from the outside.
+  // The substitutions clean up text that should exists for rendering of
+  // synthetic data, but not in the recognition set.
+  static const char* kCleanupMaps[][2];
+
   UNICHAR_SLOT* unichars;
   UNICHARMAP ids;
   int size_used;
@@ -966,6 +1024,8 @@ class UNICHARSET {
   // True if the unicharset has a significant mean-line with significant
   // ascenders above that.
   bool script_has_xheight_;
+  // True if the set contains chars that would be changed by the cleanup.
+  bool old_style_included_;
 
   // A few convenient script name-to-id mapping without using hash.
   // These are initialized when unicharset file is loaded.  Anything
@@ -978,8 +1038,10 @@ class UNICHARSET {
   int han_sid_;
   int hiragana_sid_;
   int katakana_sid_;
+  int thai_sid_;
+  int hangul_sid_;
   // The most frequently occurring script in the charset.
   int default_sid_;
 };
 
-#endif  // TESSERACT_CCUTIL_UNICHARSET_H__
+#endif  // TESSERACT_CCUTIL_UNICHARSET_H_
