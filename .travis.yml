@@ -2,10 +2,10 @@
 
 language: cpp
 
-dist: trusty
+dist: xenial
 
 env:
-  - LEPT_VER=1.74.2
+  - LEPT_VER=1.78.0
 
 notifications:
   email: false
@@ -21,18 +21,20 @@ addons:
     sources:
     #- ubuntu-toolchain-r-test
     packages:
+      - libarchive-dev
+      - libpango1.0-dev
     #- g++-6
 
-matrix:
-  include:
-    - os: osx
-      install:
-      script: brew install tesseract --HEAD
-      cache:
-        directories:
-          - $HOME/Library/Caches/Homebrew
-  allow_failures:
-    - script: brew install tesseract --HEAD
+#matrix:
+  #include:
+    #- os: osx
+      #install:
+      #script: brew install tesseract --HEAD
+      #cache:
+        #directories:
+          #- $HOME/Library/Caches/Homebrew
+  #allow_failures:
+    #- script: brew install tesseract --HEAD
 
 cache:
   directories:
@@ -51,5 +53,5 @@ install:
 script:
   - mkdir build
   - cd build
-  - cmake .. -DLeptonica_DIR=leptonica-$LEPT_VER/build
+  - cmake .. -DLeptonica_DIR=leptonica-$LEPT_VER/build -DSW_BUILD=OFF
   - make
